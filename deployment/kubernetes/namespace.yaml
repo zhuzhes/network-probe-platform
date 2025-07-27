@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: network-probe
+  labels:
+    name: network-probe
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/version: "1.0.0"

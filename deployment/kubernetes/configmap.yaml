@@ -1,0 +1,194 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: network-probe-config
+  namespace: network-probe
+  labels:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: config
+data:
+  # Database configuration
+  POSTGRES_DB: "network_probe"
+  POSTGRES_USER: "postgres"
+  POSTGRES_PORT: "5432"
+  
+  # Redis configuration
+  REDIS_PORT: "6379"
+  
+  # RabbitMQ configuration
+  RABBITMQ_USER: "admin"
+  RABBITMQ_VHOST: "network_probe"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_MANAGEMENT_PORT: "15672"
+  
+  # Application configuration
+  DEBUG: "false"
+  ENVIRONMENT: "production"
+  MANAGEMENT_PORT: "8000"
+  
+  # JWT configuration
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRE_MINUTES: "30"
+  
+  # Email configuration
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: "587"
+  SMTP_TLS: "true"
+  
+  # File upload configuration
+  MAX_UPLOAD_SIZE: "10485760"
+  
+  # Agent configuration
+  TLS_VERIFY: "true"
+  HEARTBEAT_INTERVAL: "30"
+  MAX_CONCURRENT_TASKS: "10"
+  RESOURCE_REPORT_INTERVAL: "60"
+  
+  # Logging
+  LOG_LEVEL: "INFO"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: network-probe
+  labels:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: nginx
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+        use epoll;
+        multi_accept on;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log /var/log/nginx/access.log main;
+
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        server_tokens off;
+
+        gzip on;
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_comp_level 6;
+        gzip_types
+            text/plain
+            text/css
+            text/xml
+            text/javascript
+            application/json
+            application/javascript
+            application/xml+rss
+            application/atom+xml
+            image/svg+xml;
+
+        limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=login:10m rate=1r/s;
+
+        add_header X-Frame-Options DENY always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+
+  default.conf: |
+    upstream management_backend {
+        server network-probe-management:8000;
+        keepalive 32;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location /nginx-health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        location / {
+            proxy_pass http://management_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+        }
+
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            
+            proxy_pass http://management_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            proxy_connect_timeout 30s;
+            proxy_send_timeout 30s;
+            proxy_read_timeout 30s;
+        }
+
+        location /api/v1/auth/token {
+            limit_req zone=login burst=5 nodelay;
+            
+            proxy_pass http://management_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /ws {
+            proxy_pass http://management_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
+        location ~ /\. {
+            deny all;
+        }
+        
+        location ~ \.(env|ini|conf|log)$ {
+            deny all;
+        }
+    }

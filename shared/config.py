@@ -2,7 +2,8 @@
 
 import os
 from typing import Optional
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class DatabaseConfig(BaseSettings):
@@ -63,8 +64,7 @@ class SecurityConfig(BaseSettings):
     jwt_expire_minutes: int = Field(default=30, env="JWT_EXPIRE_MINUTES")
     password_min_length: int = Field(default=8, env="PASSWORD_MIN_LENGTH")
     
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class AppConfig(BaseSettings):
@@ -88,8 +88,7 @@ class AppConfig(BaseSettings):
     # 安全配置
     security: SecurityConfig = SecurityConfig()
     
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class AgentConfig(BaseSettings):
@@ -97,11 +96,11 @@ class AgentConfig(BaseSettings):
     
     agent_id: Optional[str] = Field(default=None, env="AGENT_ID")
     agent_name: str = Field(default="probe-agent", env="AGENT_NAME")
-    server_url: str = Field(env="SERVER_URL")
+    server_url: str = Field(default="ws://localhost:8000", env="SERVER_URL")
     server_port: int = Field(default=8000, env="SERVER_PORT")
     
     # 认证配置
-    api_key: str = Field(env="AGENT_API_KEY")
+    api_key: str = Field(default="test-api-key", env="AGENT_API_KEY")
     cert_file: Optional[str] = Field(default=None, env="CERT_FILE")
     key_file: Optional[str] = Field(default=None, env="KEY_FILE")
     
@@ -113,8 +112,7 @@ class AgentConfig(BaseSettings):
     max_concurrent_tasks: int = Field(default=10, env="MAX_CONCURRENT_TASKS")
     task_timeout: int = Field(default=300, env="TASK_TIMEOUT")
     
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 # 全局配置实例

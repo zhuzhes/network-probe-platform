@@ -1,0 +1,30 @@
+[Unit]
+Description=Network Probe Platform Monitor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/network-probe-platform
+ExecStart=/opt/network-probe-platform/scripts/monitor.sh loop
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# 环境变量
+Environment=ALERT_EMAIL=admin@your-domain.com
+Environment=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+Environment=POSTGRES_USER=network_probe_user
+Environment=POSTGRES_DB=network_probe_prod
+Environment=RABBITMQ_VHOST=network_probe_prod
+
+# 安全设置
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log /tmp /opt/network-probe-platform
+
+[Install]
+WantedBy=multi-user.target

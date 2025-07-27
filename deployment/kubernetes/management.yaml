@@ -1,0 +1,268 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-probe-management
+  namespace: network-probe
+  labels:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: management
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: network-probe-platform
+      app.kubernetes.io/component: management
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: network-probe-platform
+        app.kubernetes.io/component: management
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:15-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h network-probe-postgres -p 5432 -U $POSTGRES_USER; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: POSTGRES_USER
+      - name: run-migrations
+        image: network-probe-management:latest
+        command:
+        - sh
+        - -c
+        - |
+          alembic upgrade head
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@network-probe-postgres:5432/$(POSTGRES_DB)"
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: POSTGRES_DB
+      containers:
+      - name: management
+        image: network-probe-management:latest
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        # Database
+        - name: DATABASE_URL
+          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@network-probe-postgres:5432/$(POSTGRES_DB)"
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: POSTGRES_DB
+        
+        # Redis
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@network-probe-redis:6379/0"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: REDIS_PASSWORD
+        
+        # RabbitMQ
+        - name: RABBITMQ_URL
+          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@network-probe-rabbitmq:5672/$(RABBITMQ_VHOST)"
+        - name: RABBITMQ_USER
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: RABBITMQ_USER
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: RABBITMQ_PASSWORD
+        - name: RABBITMQ_VHOST
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: RABBITMQ_VHOST
+        
+        # Application
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: SECRET_KEY
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: DEBUG
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: ENVIRONMENT
+        
+        # JWT
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: JWT_SECRET_KEY
+        - name: JWT_ALGORITHM
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: JWT_ALGORITHM
+        - name: JWT_EXPIRE_MINUTES
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: JWT_EXPIRE_MINUTES
+        
+        # Email
+        - name: SMTP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: SMTP_HOST
+        - name: SMTP_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: SMTP_PORT
+        - name: SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: SMTP_USER
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: network-probe-secrets
+              key: SMTP_PASSWORD
+        - name: SMTP_TLS
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: SMTP_TLS
+        
+        # Logging
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: network-probe-config
+              key: LOG_LEVEL
+        
+        volumeMounts:
+        - name: uploads-storage
+          mountPath: /app/uploads
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: uploads-storage
+        persistentVolumeClaim:
+          claimName: management-uploads-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: network-probe-management
+  namespace: network-probe
+  labels:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: management
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  selector:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: management
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: network-probe-management-hpa
+  namespace: network-probe
+  labels:
+    app.kubernetes.io/name: network-probe-platform
+    app.kubernetes.io/component: management
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: network-probe-management
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

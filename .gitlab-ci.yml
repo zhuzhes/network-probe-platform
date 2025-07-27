@@ -1,0 +1,285 @@
+stages:
+  - quality
+  - test
+  - build
+  - security
+  - deploy
+
+variables:
+  PYTHON_VERSION: "3.11"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+before_script:
+  - python -m venv venv
+  - source venv/bin/activate
+  - pip install --upgrade pip
+  - pip install -r requirements.txt
+
+# 代码质量检查
+code-quality:
+  stage: quality
+  image: python:$PYTHON_VERSION
+  script:
+    - pip install black flake8 mypy isort bandit safety
+    - black --check --diff .
+    - isort --check-only --diff .
+    - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    - mypy management_platform agent shared --ignore-missing-imports
+    - bandit -r management_platform agent shared -f json -o bandit-report.json
+    - safety check --json --output safety-report.json
+  artifacts:
+    reports:
+      junit: bandit-report.json
+    paths:
+      - bandit-report.json
+      - safety-report.json
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# 单元测试
+unit-tests:
+  stage: test
+  image: python:$PYTHON_VERSION
+  services:
+    - postgres:15
+    - redis:7-alpine
+  variables:
+    POSTGRES_DB: testdb
+    POSTGRES_USER: testuser
+    POSTGRES_PASSWORD: testpass
+    DATABASE_URL: postgresql://testuser:testpass@postgres:5432/testdb
+    REDIS_URL: redis://redis:6379/0
+  script:
+    - pytest tests/unit/ -v --cov=management_platform --cov=agent --cov=shared
+      --cov-report=xml --cov-report=html --cov-report=term-missing
+      --junitxml=junit.xml
+  coverage: '/TOTAL.+ ([0-9]{1,3}%)/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - htmlcov/
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# 集成测试
+integration-tests:
+  stage: test
+  image: python:$PYTHON_VERSION
+  services:
+    - postgres:15
+    - redis:7-alpine
+    - rabbitmq:3-management-alpine
+  variables:
+    POSTGRES_DB: testdb
+    POSTGRES_USER: testuser
+    POSTGRES_PASSWORD: testpass
+    DATABASE_URL: postgresql://testuser:testpass@postgres:5432/testdb
+    REDIS_URL: redis://redis:6379/0
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  script:
+    - alembic upgrade head
+    - pytest tests/integration/ -v --junitxml=junit-integration.xml
+  artifacts:
+    reports:
+      junit: junit-integration.xml
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# 前端测试
+frontend-tests:
+  stage: test
+  image: node:18
+  before_script:
+    - cd management_platform/web
+    - npm ci
+  script:
+    - npm run lint
+    - npm run test:unit
+    - npm run build
+  artifacts:
+    paths:
+      - management_platform/web/dist/
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# E2E测试
+e2e-tests:
+  stage: test
+  image: python:$PYTHON_VERSION
+  services:
+    - postgres:15
+    - redis:7-alpine
+  variables:
+    POSTGRES_DB: testdb
+    POSTGRES_USER: testuser
+    POSTGRES_PASSWORD: testpass
+    DATABASE_URL: postgresql://testuser:testpass@postgres:5432/testdb
+    REDIS_URL: redis://redis:6379/0
+  script:
+    - alembic upgrade head
+    - pytest tests/e2e/ -v --junitxml=junit-e2e.xml
+  artifacts:
+    reports:
+      junit: junit-e2e.xml
+    expire_in: 1 week
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# 构建Docker镜像
+build-images:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/management-platform:$CI_COMMIT_SHA .
+    - docker build -f Dockerfile.agent -t $CI_REGISTRY_IMAGE/agent:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE/management-platform:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/agent:$CI_COMMIT_SHA
+    # 为主分支打latest标签
+    - |
+      if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
+        docker tag $CI_REGISTRY_IMAGE/management-platform:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/management-platform:latest
+        docker tag $CI_REGISTRY_IMAGE/agent:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE/agent:latest
+        docker push $CI_REGISTRY_IMAGE/management-platform:latest
+        docker push $CI_REGISTRY_IMAGE/agent:latest
+      fi
+  only:
+    - main
+    - develop
+    - tags
+
+# 安全扫描
+security-scan:
+  stage: security
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - apk add --no-cache curl
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+  script:
+    - trivy image --format template --template "@contrib/sarif.tpl" -o trivy-report.sarif $CI_REGISTRY_IMAGE/management-platform:$CI_COMMIT_SHA
+    - trivy image --format template --template "@contrib/sarif.tpl" -o trivy-agent-report.sarif $CI_REGISTRY_IMAGE/agent:$CI_COMMIT_SHA
+  artifacts:
+    reports:
+      sast: trivy-report.sarif
+    paths:
+      - trivy-report.sarif
+      - trivy-agent-report.sarif
+    expire_in: 1 week
+  only:
+    - main
+    - develop
+    - tags
+
+# 部署到测试环境
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan $STAGING_HOST >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - scp deployment/docker-compose.yml $STAGING_USER@$STAGING_HOST:/opt/network-probe-platform/
+    - scp deployment/.env.example $STAGING_USER@$STAGING_HOST:/opt/network-probe-platform/.env
+    - ssh $STAGING_USER@$STAGING_HOST "cd /opt/network-probe-platform && 
+        export IMAGE_TAG=$CI_COMMIT_SHA && 
+        docker-compose pull && 
+        docker-compose up -d --remove-orphans"
+  environment:
+    name: staging
+    url: https://staging.networkprobe.example.com
+  only:
+    - develop
+
+# 部署到生产环境
+deploy-production:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$PRODUCTION_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan $PRODUCTION_HOST >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - scp deployment/docker-compose.yml $PRODUCTION_USER@$PRODUCTION_HOST:/opt/network-probe-platform/
+    - scp deployment/.env.example $PRODUCTION_USER@$PRODUCTION_HOST:/opt/network-probe-platform/.env
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/network-probe-platform && 
+        export IMAGE_TAG=$CI_COMMIT_SHA && 
+        docker-compose pull && 
+        docker-compose up -d --remove-orphans && 
+        docker system prune -f"
+  environment:
+    name: production
+    url: https://networkprobe.example.com
+  when: manual
+  only:
+    - main
+    - tags
+
+# 通知
+notify-success:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"✅ 部署成功: $CI_PROJECT_NAME - $CI_COMMIT_REF_NAME ($CI_COMMIT_SHA)\"}" \
+        $SLACK_WEBHOOK_URL
+  when: on_success
+  only:
+    - main
+    - develop
+
+notify-failure:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"❌ 部署失败: $CI_PROJECT_NAME - $CI_COMMIT_REF_NAME ($CI_COMMIT_SHA)\"}" \
+        $SLACK_WEBHOOK_URL
+  when: on_failure
+  only:
+    - main
+    - develop

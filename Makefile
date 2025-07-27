@@ -108,3 +108,48 @@ security-check:
 # 性能测试
 perf-test:
 	locust -f tests/performance/locustfile.py --host=http://localhost:8000
+
+# CI/CD相关
+ci-install:
+	pip install -r requirements.txt
+	pip install black flake8 mypy isort bandit safety pytest-cov
+
+ci-test:
+	pytest tests/ -v --cov=management_platform --cov=agent --cov=shared \
+		--cov-report=xml --cov-report=html --cov-report=term-missing \
+		--junitxml=junit.xml
+
+ci-lint:
+	black --check --diff .
+	isort --check-only --diff .
+	flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+	mypy management_platform agent shared --ignore-missing-imports
+
+ci-security:
+	bandit -r management_platform agent shared -f json -o bandit-report.json
+	safety check --json --output safety-report.json
+
+ci-build:
+	docker build -t networkprobe/management-platform:latest .
+	docker build -f Dockerfile.agent -t networkprobe/agent:latest .
+
+# 部署相关
+deploy-staging:
+	./deployment/deploy.sh staging
+
+deploy-production:
+	./deployment/deploy.sh production
+
+# 健康检查
+health-check:
+	curl -f http://localhost:8000/health || exit 1
+
+# 日志查看
+logs:
+	docker-compose logs -f
+
+logs-management:
+	docker-compose logs -f management-platform
+
+logs-agent:
+	docker-compose logs -f agent

@@ -1,0 +1,131 @@
+version: '3.8'
+
+# Development environment overrides
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: network_probe_dev
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+
+  redis:
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass dev_redis
+
+  rabbitmq:
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: dev_admin
+      RABBITMQ_DEFAULT_PASS: dev_admin
+      RABBITMQ_DEFAULT_VHOST: network_probe_dev
+
+  management:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COMPONENT: management
+    environment:
+      DATABASE_URL: postgresql://dev_user:dev_password@postgres:5432/network_probe_dev
+      REDIS_URL: redis://:dev_redis@redis:6379/0
+      RABBITMQ_URL: amqp://dev_admin:dev_admin@rabbitmq:5672/network_probe_dev
+      SECRET_KEY: dev-secret-key-not-for-production
+      DEBUG: "true"
+      ENVIRONMENT: development
+      JWT_SECRET_KEY: dev-jwt-secret
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ../management_platform:/app/management_platform
+      - ../shared:/app/shared
+      - ../migrations:/app/migrations
+      - ../alembic.ini:/app/alembic.ini
+      - management_uploads:/app/uploads
+      - management_logs:/app/logs
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        python -c 'import time; import psycopg2; 
+        while True:
+          try: 
+            psycopg2.connect(\"postgresql://dev_user:dev_password@postgres:5432/network_probe_dev\"); 
+            break
+          except: 
+            time.sleep(1)' &&
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting development server...' &&
+        uvicorn management_platform.api.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        COMPONENT: agent
+    environment:
+      MANAGEMENT_URL: ws://management:8000/ws
+      AGENT_ID: dev-agent-001
+      AGENT_NAME: Development Agent 001
+      AGENT_TOKEN: dev-agent-token
+      TLS_VERIFY: "false"
+      LOG_LEVEL: DEBUG
+      HEARTBEAT_INTERVAL: 10
+      RESOURCE_REPORT_INTERVAL: 30
+    volumes:
+      - ../agent:/app/agent
+      - ../shared:/app/shared
+      - agent_logs:/app/logs
+      - agent_data:/app/data
+    command: >
+      sh -c "
+        echo 'Waiting for management platform...' &&
+        python -c 'import time; import requests; 
+        while True:
+          try: 
+            requests.get(\"http://management:8000/health\", timeout=5); 
+            break
+          except: 
+            time.sleep(2)' &&
+        echo 'Starting agent...' &&
+        python -m agent
+      "
+
+  # Development database admin tool
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: network-probe-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    networks:
+      - network-probe-net
+    depends_on:
+      - postgres
+    profiles:
+      - dev-tools
+
+  # Redis admin tool
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: network-probe-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:dev_redis
+    ports:
+      - "8081:8081"
+    networks:
+      - network-probe-net
+    depends_on:
+      - redis
+    profiles:
+      - dev-tools
